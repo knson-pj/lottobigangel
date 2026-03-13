@@ -1,3 +1,5 @@
+import { supabaseAdmin } from '@/lib/supabase-admin'
+
 export type NumberScore = {
   number: number
   probability: number
@@ -8,6 +10,11 @@ export type ComboScore = {
   numbers: [number, number, number, number, number, number]
   score: number
   meta?: Record<string, unknown>
+}
+
+type ExportRow = {
+  number: number
+  probability: number
 }
 
 function seededRandom(seed: number) {
@@ -33,17 +40,10 @@ function scoreCombo(combo: number[], probabilities: Map<number, number>) {
   if (90 <= totalSum && totalSum <= 180) score += 0.18
   if (endingUnique <= 3) score -= 0.18
 
-  return score
+  return Number(score.toFixed(6))
 }
 
-export async function runPrediction(targetRound: number) {
-  const rng = seededRandom(targetRound)
-
-  const numberScores: NumberScore[] = Array.from({ length: 45 }, (_, idx) => ({
-    number: idx + 1,
-    probability: Number((0.1 + rng() * 0.9).toFixed(6))
-  })).sort((a, b) => b.probability - a.probability)
-
+function buildCombosFromScores(numberScores: NumberScore[]) {
   const topPool = numberScores.slice(0, 24).map((x) => x.number).sort((a, b) => a - b)
   const probMap = new Map(numberScores.map((x) => [x.number, x.probability]))
 
@@ -60,32 +60,10 @@ export async function runPrediction(targetRound: number) {
         topPool[(j + 8) % topPool.length],
         topPool[(j + 11) % topPool.length]
       ]
+
       const unique = Array.from(new Set(combo)).sort((a, b) => a - b)
       if (unique.length !== 6) continue
 
       combos.push({
         rank: comboRank++,
-        numbers: unique as [number, number, number, number, number, number],
-        score: Number(scoreCombo(unique, probMap).toFixed(6)),
-        meta: {
-          oddCount: unique.filter((n) => n % 2 === 1).length,
-          totalSum: unique.reduce((a, b) => a + b, 0)
-        }
-      })
-    }
-  }
-
-  combos.sort((a, b) => b.score - a.score)
-  combos.forEach((combo, idx) => {
-    combo.rank = idx + 1
-  })
-
-  return {
-    modelVersion: process.env.MODEL_VERSION ?? 'tcn-v1',
-    featureVersion: process.env.FEATURE_VERSION ?? 'feat-v1',
-    topPoolSize: 24,
-    comboCount: combos.length,
-    numberScores,
-    combos
-  }
 }
