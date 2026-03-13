@@ -1,0 +1,12 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/sync-draws",
+      "schedule": "15 0 * * *"
+    },
+    {
+      "path": "/api/cron/daily-predict",
+      "schedule": "20 0 * * *"
+    }
+  ]
+}
