@@ -7,9 +7,11 @@ Supabase(PostgREST)의 model_probability_exports 테이블/뷰에서
 
 특징
 - .env.local 자동 로드
+- .env.local 이 없거나, 폴더이거나, 권한 이슈가 있어도 경고만 출력
 - export_id 우선으로 최신 묶음 선택
 - export_id가 없으면 target_round + model + generated_at 조합으로 fallback
 - 컬럼명이 조금 달라도 alias로 최대한 흡수
+- 디버그 로그 포함
 - 외부 패키지 없이 표준 라이브러리만 사용
 
 기본 실행:
@@ -128,11 +130,29 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def resolve_repo_root() -> Path:
+    # repo-root/ml/export/export_prediction_snapshot.py 기준
+    return Path(__file__).resolve().parents[2]
+
+
 def load_env_file_if_exists(env_path: Path) -> None:
     if not env_path.exists():
         return
 
-    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+    if env_path.is_dir():
+        print(f"[WARN] .env.local 경로가 파일이 아니라 폴더입니다: {env_path}")
+        return
+
+    try:
+        text = env_path.read_text(encoding="utf-8")
+    except PermissionError:
+        print(f"[WARN] .env.local 파일을 읽을 권한이 없습니다: {env_path}")
+        return
+    except OSError as e:
+        print(f"[WARN] .env.local 파일을 읽지 못했습니다: {env_path} ({e})")
+        return
+
+    for raw_line in text.splitlines():
         line = raw_line.strip()
 
         if not line or line.startswith("#"):
@@ -151,14 +171,8 @@ def load_env_file_if_exists(env_path: Path) -> None:
         if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
             value = value[1:-1]
 
-        # 이미 셸에서 지정된 값이 있으면 덮어쓰지 않음
         if key not in os.environ:
             os.environ[key] = value
-
-
-def resolve_repo_root() -> Path:
-    # repo-root/ml/export/export_prediction_snapshot.py 기준으로 상위 2단계가 repo-root
-    return Path(__file__).resolve().parents[2]
 
 
 def parse_int(value: Any) -> Optional[int]:
@@ -227,7 +241,7 @@ def normalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
 
     extras = {k: v for k, v in row.items() if k not in reserved_keys}
 
-    item = {
+    return {
         "exportId": first_present(row, "export_id"),
         "targetRound": parse_int(first_present(row, "target_round")),
         "number": parse_int(first_present(row, "number")),
@@ -242,7 +256,6 @@ def normalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "extra": extras,
         "raw": row,
     }
-    return item
 
 
 def group_key(item: Dict[str, Any]) -> Tuple[Any, ...]:
@@ -268,30 +281,28 @@ def choose_latest_group(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
         groups[group_key(item)].append(item)
 
-   if not groups:
-    preview = []
-    for item in items[:5]:
-        preview.append({
-            "targetRound": item.get("targetRound"),
-            "number": item.get("number"),
-            "probability": item.get("probability"),
-            "rank": item.get("rank"),
-            "modelKey": item.get("modelKey"),
-            "modelVersion": item.get("modelVersion"),
-            "generatedAt": item.get("generatedAt"),
-            "rawKeys": sorted(list(item.get("raw", {}).keys()))[:50],
-        })
+    if not groups:
+        preview = []
+        for item in items[:5]:
+            preview.append(
+                {
+                    "targetRound": item.get("targetRound"),
+                    "number": item.get("number"),
+                    "probability": item.get("probability"),
+                    "rank": item.get("rank"),
+                    "modelKey": item.get("modelKey"),
+                    "modelVersion": item.get("modelVersion"),
+                    "generatedAt": item.get("generatedAt"),
+                    "rawKeys": sorted(list(item.get("raw", {}).keys()))[:50],
+                }
+            )
 
-    raise RuntimeError(
-        "유효한 export row를 찾지 못했습니다. "
-        f"fetched={len(items)}, preview={json.dumps(preview, ensure_ascii=False)}"
-    )
+        raise RuntimeError(
+            "유효한 export row를 찾지 못했습니다. "
+            f"fetched={len(items)}, preview={json.dumps(preview, ensure_ascii=False)}"
+        )
 
     def sort_key(rows: List[Dict[str, Any]]) -> Tuple[Any, ...]:
-        # 최신 판단 우선순위:
-        # 1) targetRound 큰 것
-        # 2) generatedAt 큰 것
-        # 3) modelVersion / modelKey
         best = max(
             rows,
             key=lambda r: (
@@ -333,7 +344,12 @@ def assign_rank_if_missing(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return ranked
 
 
-def fetch_rows_from_supabase(supabase_url: str, supabase_key: str, table: str, limit: int) -> List[Dict[str, Any]]:
+def fetch_rows_from_supabase(
+    supabase_url: str,
+    supabase_key: str,
+    table: str,
+    limit: int,
+) -> List[Dict[str, Any]]:
     if not supabase_url:
         raise RuntimeError("SUPABASE_URL이 비어 있습니다. .env.local 또는 환경변수를 확인하세요.")
     if not supabase_key:
@@ -422,7 +438,7 @@ def build_snapshot(items: List[Dict[str, Any]], table: str, top_k: int) -> Dict[
 
         numbers.append(row)
 
-    snapshot = {
+    return {
         "snapshotVersion": 1,
         "generatedAt": utc_now_iso(),
         "source": {
@@ -447,7 +463,6 @@ def build_snapshot(items: List[Dict[str, Any]], table: str, top_k: int) -> Dict[
         },
         "metadata": merged_metadata,
     }
-    return snapshot
 
 
 def write_json(path: Path, payload: Dict[str, Any], pretty: bool) -> None:
@@ -479,10 +494,10 @@ def main() -> int:
             limit=args.limit,
         )
 
-print(f"[INFO] fetched rows: {len(raw_rows)}")
-if raw_rows:
-    print(f"[INFO] first row keys: {sorted(raw_rows[0].keys())}")
-    print(f"[INFO] first row sample: {json.dumps(raw_rows[0], ensure_ascii=False)[:1000]}")
+        print(f"[INFO] fetched rows: {len(raw_rows)}")
+        if raw_rows:
+            print(f"[INFO] first row keys: {sorted(raw_rows[0].keys())}")
+            print(f"[INFO] first row sample: {json.dumps(raw_rows[0], ensure_ascii=False)[:1000]}")
 
         items = [normalize_row(row) for row in raw_rows]
         items = filter_by_target_round(items, args.target_round)
