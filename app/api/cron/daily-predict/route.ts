@@ -1,0 +1,75 @@
+import { NextResponse } from 'next/server'
+
+import { assertCronAuthorized } from '@/lib/cron'
+import { runPrediction } from '@/lib/predict'
+import { supabaseAdmin } from '@/lib/supabase-admin'
+
+export async function GET(req: Request) {
+  try {
+    assertCronAuthorized(req)
+
+    const drawRes = await supabaseAdmin
+      .from('lotto_draws')
+      .select('round')
+      .order('round', { ascending: false })
+      .limit(1)
+      .single()
+
+    if (drawRes.error) throw drawRes.error
+
+    const latestRound = Number(drawRes.data.round)
+    const targetRound = latestRound + 1
+    const modelVersion = process.env.MODEL_VERSION ?? 'tcn-v1'
+
+    const existingRun = await supabaseAdmin
+      .from('prediction_runs')
+      .select('id')
+      .eq('target_round', targetRound)
+      .eq('model_version', modelVersion)
+      .eq('triggered_by', 'cron')
+      .eq('status', 'completed')
+      .limit(1)
+      .maybeSingle()
+
+    if (existingRun.error) throw existingRun.error
+
+    if (existingRun.data) {
+      return NextResponse.json({ ok: true, skipped: true, reason: 'already_exists', runId: existingRun.data.id })
+    }
+
+    const result = await runPrediction(targetRound)
+
+    const runInsert = await supabaseAdmin
+      .from('prediction_runs')
+      .insert({
+        target_round: targetRound,
+        model_version: result.modelVersion,
+        feature_version: result.featureVersion,
+        triggered_by: 'cron',
+        status: 'completed',
+        top_pool_size: result.topPoolSize,
+        combo_count: result.comboCount
+      })
+      .select('id')
+      .single()
+
+    if (runInsert.error) throw runInsert.error
+
+    const runId = runInsert.data.id
+
+    const numberRows = result.numberScores.map((item, idx) => ({
+      run_id: runId,
+      number: item.number,
+      probability: item.probability,
+      rank_order: idx + 1
+    }))
+
+    const comboRows = result.combos.map((combo) => ({
+      run_id: runId,
+      combo_rank: combo.rank,
+      n1: combo.numbers[0],
+      n2: combo.numbers[1],
+      n3: combo.numbers[2],
+      n4: combo.numbers[3],
+      n5: combo.numbers[4],
+}
