@@ -72,4 +72,21 @@ export async function GET(req: Request) {
       n3: combo.numbers[2],
       n4: combo.numbers[3],
       n5: combo.numbers[4],
+      n6: combo.numbers[5],
+      combo_score: combo.score,
+      meta: combo.meta ?? {}
+    }))
+
+    const [numberInsert, comboInsert] = await Promise.all([
+      supabaseAdmin.from('prediction_number_scores').insert(numberRows),
+      supabaseAdmin.from('prediction_combos').insert(comboRows)
+    ])
+
+    if (numberInsert.error) throw numberInsert.error
+    if (comboInsert.error) throw comboInsert.error
+
+    return NextResponse.json({ ok: true, runId, targetRound })
+  } catch (error: any) {
+    return NextResponse.json({ ok: false, error: error?.message ?? 'unknown error' }, { status: 500 })
+  }
 }

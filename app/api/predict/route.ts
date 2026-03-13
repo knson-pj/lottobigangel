@@ -61,4 +61,54 @@ export async function POST(req: Request) {
 
     const [numberInsert, comboInsert] = await Promise.all([
       supabaseAdmin.from('prediction_number_scores').insert(numberRows),
+      supabaseAdmin.from('prediction_combos').insert(comboRows)
+    ])
+
+    if (numberInsert.error) throw numberInsert.error
+    if (comboInsert.error) throw comboInsert.error
+
+    waitUntil(
+      writeServerLog({
+        level: 'info',
+        eventType: 'predict.success',
+        requestId,
+        route,
+        targetRound: parsed.targetRound,
+        payload: {
+          durationMs: Date.now() - startedAt,
+          runId
+        }
+      })
+    )
+
+    return NextResponse.json({
+      ok: true,
+      requestId,
+      runId,
+      targetRound: parsed.targetRound,
+      top24: result.numberScores.slice(0, 24),
+      combos: result.combos
+    })
+  } catch (error: any) {
+    waitUntil(
+      writeServerLog({
+        level: 'error',
+        eventType: 'predict.error',
+        requestId,
+        route,
+        payload: {
+          message: error?.message ?? 'unknown error'
+        }
+      })
+    )
+
+    return NextResponse.json(
+      {
+        ok: false,
+        requestId,
+        error: error?.message ?? 'unknown error'
+      },
+      { status: 500 }
+    )
+  }
 }

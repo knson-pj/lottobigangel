@@ -34,4 +34,25 @@ export async function GET(req: Request) {
       .from('lotto_draws')
       .upsert(latestDraw, { onConflict: 'round' })
 
+    if (upsertRes.error) throw upsertRes.error
+
+    await writeServerLog({
+      level: 'info',
+      eventType: 'cron.sync_draws.success',
+      route: '/api/cron/sync-draws',
+      targetRound: latestDraw.round,
+      payload: { syncedRound: latestDraw.round }
+    })
+
+    return NextResponse.json({ ok: true, syncedRound: latestDraw.round })
+  } catch (error: any) {
+    await writeServerLog({
+      level: 'error',
+      eventType: 'cron.sync_draws.error',
+      route: '/api/cron/sync-draws',
+      payload: { message: error?.message ?? 'unknown error' }
+    })
+
+    return NextResponse.json({ ok: false, error: error?.message ?? 'unknown error' }, { status: 500 })
+  }
 }

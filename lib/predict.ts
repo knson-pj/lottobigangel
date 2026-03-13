@@ -75,4 +75,17 @@ export async function runPrediction(targetRound: number) {
     }
   }
 
+  combos.sort((a, b) => b.score - a.score)
+  combos.forEach((combo, idx) => {
+    combo.rank = idx + 1
+  })
+
+  return {
+    modelVersion: process.env.MODEL_VERSION ?? 'tcn-v1',
+    featureVersion: process.env.FEATURE_VERSION ?? 'feat-v1',
+    topPoolSize: 24,
+    comboCount: combos.length,
+    numberScores,
+    combos
+  }
 }
