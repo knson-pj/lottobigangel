@@ -1,4 +1,3 @@
-import { waitUntil } from '@vercel/functions'
 import crypto from 'node:crypto'
 import { NextResponse } from 'next/server'
 import { z } from 'zod'
@@ -67,19 +66,17 @@ export async function POST(req: Request) {
     if (numberInsert.error) throw numberInsert.error
     if (comboInsert.error) throw comboInsert.error
 
-    waitUntil(
-      writeServerLog({
-        level: 'info',
-        eventType: 'predict.success',
-        requestId,
-        route,
-        targetRound: parsed.targetRound,
-        payload: {
-          durationMs: Date.now() - startedAt,
-          runId
-        }
-      })
-    )
+    await writeServerLog({
+      level: 'info',
+      eventType: 'predict.success',
+      requestId,
+      route,
+      targetRound: parsed.targetRound,
+      payload: {
+        durationMs: Date.now() - startedAt,
+        runId
+      }
+    })
 
     return NextResponse.json({
       ok: true,
@@ -90,17 +87,15 @@ export async function POST(req: Request) {
       combos: result.combos
     })
   } catch (error: any) {
-    waitUntil(
-      writeServerLog({
-        level: 'error',
-        eventType: 'predict.error',
-        requestId,
-        route,
-        payload: {
-          message: error?.message ?? 'unknown error'
-        }
-      })
-    )
+    await writeServerLog({
+      level: 'error',
+      eventType: 'predict.error',
+      requestId,
+      route,
+      payload: {
+        message: error?.message ?? 'unknown error'
+      }
+    })
 
     return NextResponse.json(
       {
