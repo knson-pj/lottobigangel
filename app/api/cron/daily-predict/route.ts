@@ -1,10 +1,13 @@
 import { NextResponse } from 'next/server'
 
 import { assertCronAuthorized } from '@/lib/cron'
+import { writeServerLog } from '@/lib/log'
 import { runPrediction } from '@/lib/predict'
 import { supabaseAdmin } from '@/lib/supabase-admin'
 
 export async function GET(req: Request) {
+  const route = '/api/cron/daily-predict'
+
   try {
     assertCronAuthorized(req)
 
@@ -34,7 +37,24 @@ export async function GET(req: Request) {
     if (existingRun.error) throw existingRun.error
 
     if (existingRun.data) {
-      return NextResponse.json({ ok: true, skipped: true, reason: 'already_exists', runId: existingRun.data.id })
+      await writeServerLog({
+        level: 'info',
+        eventType: 'cron.daily_predict.skipped',
+        route,
+        targetRound,
+        payload: {
+          reason: 'already_exists',
+          runId: existingRun.data.id
+        }
+      })
+
+      return NextResponse.json({
+        ok: true,
+        skipped: true,
+        reason: 'already_exists',
+        runId: existingRun.data.id,
+        targetRound
+      })
     }
 
     const result = await runPrediction(targetRound)
@@ -85,8 +105,28 @@ export async function GET(req: Request) {
     if (numberInsert.error) throw numberInsert.error
     if (comboInsert.error) throw comboInsert.error
 
+    await writeServerLog({
+      level: 'info',
+      eventType: 'cron.daily_predict.success',
+      route,
+      targetRound,
+      payload: {
+        runId,
+        latestRound,
+        comboCount: result.comboCount,
+        topPoolSize: result.topPoolSize
+      }
+    })
+
     return NextResponse.json({ ok: true, runId, targetRound })
   } catch (error: any) {
+    await writeServerLog({
+      level: 'error',
+      eventType: 'cron.daily_predict.error',
+      route,
+      payload: { message: error?.message ?? 'unknown error' }
+    })
+
     return NextResponse.json({ ok: false, error: error?.message ?? 'unknown error' }, { status: 500 })
   }
 }
