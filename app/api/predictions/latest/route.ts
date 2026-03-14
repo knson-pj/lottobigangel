@@ -1,16 +1,18 @@
 import { NextResponse } from "next/server";
+
+import { getLatestModelProbabilitySnapshot } from "@/lib/model-probability-exports";
 import { getPredictionSnapshot, getPredictionSummary } from "@/lib/predict";
 
-export const dynamic = "force-static";
+export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const snapshot = await getPredictionSnapshot();
+  const snapshot = (await getLatestModelProbabilitySnapshot()) ?? (await getPredictionSnapshot());
 
   if (!snapshot) {
     return NextResponse.json(
       {
         ok: false,
-        error: "prediction_snapshot.json not found or invalid",
+        error: "No prediction data found in model_probability_exports or public/prediction_snapshot.json",
       },
       { status: 404 },
     );
