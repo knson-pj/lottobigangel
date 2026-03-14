@@ -1,15 +1,10 @@
-export default function HomePage() {
-  return (
-    <main style={{ padding: 24, fontFamily: 'Arial, sans-serif' }}>
-      <h1>Lotto Big Angel</h1>
-      <p>온라인 운영용 1차 스캐폴드가 연결된 상태입니다.</p>
-      <ul>
-        <li>/api/predictions/latest</li>
-        <li>/api/predict</li>
-        <li>/api/cron/sync-draws</li>
-        <li>/api/cron/daily-predict</li>
-        <li>/api/admin/backtest</li>
-      </ul>
-    </main>
-  )
+import LatestPredictionPanel from "./latest-prediction-panel";
+
+export const metadata = {
+  title: "Latest Predictions",
+  description: "최신 로또 예측 스냅샷 확인 페이지",
+};
+
+export default function LatestPredictionsPage() {
+  return <LatestPredictionPanel />;
 }
