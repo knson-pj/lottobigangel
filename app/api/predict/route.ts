@@ -1,49 +1,49 @@
-import crypto from 'node:crypto'
-import { NextResponse } from 'next/server'
-import { z } from 'zod'
+import crypto from "node:crypto";
+import { NextResponse } from "next/server";
+import { z } from "zod";
 
-import { writeServerLog } from '@/lib/log'
-import { runPrediction } from '@/lib/predict'
-import { supabaseAdmin } from '@/lib/supabase-admin'
+import { writeServerLog } from "@/lib/log";
+import { runPrediction } from "@/lib/prediction-engine";
+import { upsertModelProbabilityExports } from "@/lib/model-probability-exports";
+import { supabaseAdmin } from "@/lib/supabase-admin";
 
 const bodySchema = z.object({
-  targetRound: z.number().int().positive()
-})
+  targetRound: z.number().int().positive(),
+});
 
 export async function POST(req: Request) {
-  const requestId = crypto.randomUUID()
-  const route = '/api/predict'
-  const startedAt = Date.now()
+  const requestId = crypto.randomUUID();
+  const route = "/api/predict";
+  const startedAt = Date.now();
 
   try {
-    const parsed = bodySchema.parse(await req.json())
-    const result = await runPrediction(parsed.targetRound)
+    const parsed = bodySchema.parse(await req.json());
+    const result = await runPrediction(parsed.targetRound);
 
     const runInsert = await supabaseAdmin
-      .from('prediction_runs')
+      .from("prediction_runs")
       .insert({
         target_round: parsed.targetRound,
         model_version: result.modelVersion,
         feature_version: result.featureVersion,
-        triggered_by: 'user',
+        triggered_by: "user",
         request_id: requestId,
-        status: 'completed',
+        status: "completed",
         top_pool_size: result.topPoolSize,
-        combo_count: result.comboCount
+        combo_count: result.comboCount,
       })
-      .select('id')
-      .single()
+      .select("id")
+      .single();
 
-    if (runInsert.error) throw runInsert.error
-
-    const runId = runInsert.data.id
+    if (runInsert.error) throw runInsert.error;
+    const runId = runInsert.data.id;
 
     const numberRows = result.numberScores.map((item, idx) => ({
       run_id: runId,
       number: item.number,
       probability: item.probability,
-      rank_order: idx + 1
-    }))
+      rank_order: idx + 1,
+    }));
 
     const comboRows = result.combos.map((combo) => ({
       run_id: runId,
@@ -55,55 +55,58 @@ export async function POST(req: Request) {
       n5: combo.numbers[4],
       n6: combo.numbers[5],
       combo_score: combo.score,
-      meta: combo.meta ?? {}
-    }))
+      meta: combo.meta ?? {},
+    }));
 
-    const [numberInsert, comboInsert] = await Promise.all([
-      supabaseAdmin.from('prediction_number_scores').insert(numberRows),
-      supabaseAdmin.from('prediction_combos').insert(comboRows)
-    ])
+    const [numberInsert, comboInsert, exportResult] = await Promise.all([
+      supabaseAdmin.from("prediction_number_scores").insert(numberRows),
+      supabaseAdmin.from("prediction_combos").insert(comboRows),
+      upsertModelProbabilityExports(result, "user"),
+    ]);
 
-    if (numberInsert.error) throw numberInsert.error
-    if (comboInsert.error) throw comboInsert.error
+    if (numberInsert.error) throw numberInsert.error;
+    if (comboInsert.error) throw comboInsert.error;
 
     await writeServerLog({
-      level: 'info',
-      eventType: 'predict.success',
+      level: "info",
+      eventType: "predict.success",
       requestId,
       route,
       targetRound: parsed.targetRound,
       payload: {
         durationMs: Date.now() - startedAt,
-        runId
-      }
-    })
+        runId,
+        exportedCount: exportResult.upsertedCount,
+      },
+    });
 
     return NextResponse.json({
       ok: true,
       requestId,
       runId,
       targetRound: parsed.targetRound,
+      exportedCount: exportResult.upsertedCount,
       top24: result.numberScores.slice(0, 24),
-      combos: result.combos
-    })
+      combos: result.combos,
+    });
   } catch (error: any) {
     await writeServerLog({
-      level: 'error',
-      eventType: 'predict.error',
+      level: "error",
+      eventType: "predict.error",
       requestId,
       route,
       payload: {
-        message: error?.message ?? 'unknown error'
-      }
-    })
+        message: error?.message ?? "unknown error",
+      },
+    });
 
     return NextResponse.json(
       {
         ok: false,
         requestId,
-        error: error?.message ?? 'unknown error'
+        error: error?.message ?? "unknown error",
       },
-      { status: 500 }
-    )
+      { status: 500 },
+    );
   }
 }
