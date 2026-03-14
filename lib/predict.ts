@@ -1,69 +1,206 @@
-import { supabaseAdmin } from '@/lib/supabase-admin'
+import { promises as fs } from "fs";
+import path from "path";
 
-export type NumberScore = {
-  number: number
-  probability: number
+export type PredictionNumber = {
+  number: number;
+  probability: number;
+  rank: number;
+  recentWindow?: number;
+  calibrated?: boolean;
+  extra?: Record<string, unknown>;
+};
+
+export type PredictionSnapshot = {
+  snapshotVersion: number;
+  generatedAt: string;
+  source: {
+    kind: string;
+    table: string;
+    exportId?: string | null;
+  };
+  prediction: {
+    targetRound: number;
+    modelKey: string;
+    modelVersion: string;
+    featureVersion?: string;
+    topK: number;
+    topNumbersByRank: number[];
+    topNumbersSorted: number[];
+    numbers: PredictionNumber[];
+  };
+  summary: {
+    candidateCount: number;
+    probabilitySum: number | null;
+    maxProbability: number | null;
+    minProbability: number | null;
+  };
+  metadata?: Record<string, unknown>;
+};
+
+const SNAPSHOT_RELATIVE_PATH = path.join("public", "prediction_snapshot.json");
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export type ComboScore = {
-  rank: number
-  numbers: [number, number, number, number, number, number]
-  score: number
-  meta?: Record<string, unknown>
+function toNumber(value: unknown, fallback = 0): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
-type ExportRow = {
-  number: number
-  probability: number
+function toOptionalNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-function seededRandom(seed: number) {
-  let value = seed % 2147483647
-  if (value <= 0) value += 2147483646
-  return () => {
-    value = (value * 16807) % 2147483647
-    return (value - 1) / 2147483646
+function toOptionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function toStringValue(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function toNumberArray(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is number => typeof item === "number" && Number.isFinite(item));
+}
+
+function normalizePredictionNumber(value: unknown): PredictionNumber | null {
+  if (!isRecord(value)) return null;
+
+  const number = toNumber(value.number, NaN);
+  const probability = toNumber(value.probability, NaN);
+  const rank = toNumber(value.rank, NaN);
+
+  if (!Number.isFinite(number) || !Number.isFinite(probability) || !Number.isFinite(rank)) {
+    return null;
+  }
+
+  const normalized: PredictionNumber = {
+    number,
+    probability,
+    rank,
+  };
+
+  const recentWindow = toOptionalNumber(value.recentWindow);
+  if (recentWindow !== undefined) normalized.recentWindow = recentWindow;
+
+  const calibrated = toOptionalBoolean(value.calibrated);
+  if (calibrated !== undefined) normalized.calibrated = calibrated;
+
+  if (isRecord(value.extra)) normalized.extra = value.extra;
+
+  return normalized;
+}
+
+function normalizeSnapshot(raw: unknown): PredictionSnapshot | null {
+  if (!isRecord(raw) || !isRecord(raw.source) || !isRecord(raw.prediction) || !isRecord(raw.summary)) {
+    return null;
+  }
+
+  const numbersRaw = Array.isArray(raw.prediction.numbers) ? raw.prediction.numbers : [];
+  const numbers = numbersRaw.map(normalizePredictionNumber).filter((item): item is PredictionNumber => item !== null);
+
+  if (numbers.length === 0) return null;
+
+  const snapshot: PredictionSnapshot = {
+    snapshotVersion: toNumber(raw.snapshotVersion, 1),
+    generatedAt: toStringValue(raw.generatedAt),
+    source: {
+      kind: toStringValue(raw.source.kind, "supabase"),
+      table: toStringValue(raw.source.table, "model_probability_exports"),
+      exportId: raw.source.exportId == null ? null : toStringValue(raw.source.exportId),
+    },
+    prediction: {
+      targetRound: toNumber(raw.prediction.targetRound, 0),
+      modelKey: toStringValue(raw.prediction.modelKey, "stage3-minimal"),
+      modelVersion: toStringValue(raw.prediction.modelVersion, "unknown"),
+      featureVersion: toStringValue(raw.prediction.featureVersion, "unknown"),
+      topK: toNumber(raw.prediction.topK, numbers.length),
+      topNumbersByRank: toNumberArray(raw.prediction.topNumbersByRank),
+      topNumbersSorted: toNumberArray(raw.prediction.topNumbersSorted),
+      numbers,
+    },
+    summary: {
+      candidateCount: toNumber(raw.summary.candidateCount, numbers.length),
+      probabilitySum: raw.summary.probabilitySum == null ? null : toNumber(raw.summary.probabilitySum, 0),
+      maxProbability: raw.summary.maxProbability == null ? null : toNumber(raw.summary.maxProbability, 0),
+      minProbability: raw.summary.minProbability == null ? null : toNumber(raw.summary.minProbability, 0),
+    },
+    metadata: isRecord(raw.metadata) ? raw.metadata : {},
+  };
+
+  if (snapshot.prediction.topNumbersByRank.length === 0) {
+    snapshot.prediction.topNumbersByRank = numbers
+      .slice()
+      .sort((a, b) => a.rank - b.rank || b.probability - a.probability || a.number - b.number)
+      .map((item) => item.number);
+  }
+
+  if (snapshot.prediction.topNumbersSorted.length === 0) {
+    snapshot.prediction.topNumbersSorted = snapshot.prediction.topNumbersByRank.slice().sort((a, b) => a - b);
+  }
+
+  return snapshot;
+}
+
+async function readSnapshotFromFile(): Promise<PredictionSnapshot | null> {
+  try {
+    const fullPath = path.join(process.cwd(), SNAPSHOT_RELATIVE_PATH);
+    const text = await fs.readFile(fullPath, "utf-8");
+    return normalizeSnapshot(JSON.parse(text));
+  } catch {
+    return null;
   }
 }
 
-function scoreCombo(combo: number[], probabilities: Map<number, number>) {
-  let score = combo.reduce((sum, n) => sum + (probabilities.get(n) ?? 0), 0)
-
-  const oddCount = combo.filter((n) => n % 2 === 1).length
-  const lowCount = combo.filter((n) => n <= 22).length
-  const totalSum = combo.reduce((a, b) => a + b, 0)
-  const endings = combo.map((n) => n % 10)
-  const endingUnique = new Set(endings).size
-
-  if ([2, 3, 4].includes(oddCount)) score += 0.12
-  if ([2, 3, 4].includes(lowCount)) score += 0.12
-  if (90 <= totalSum && totalSum <= 180) score += 0.18
-  if (endingUnique <= 3) score -= 0.18
-
-  return Number(score.toFixed(6))
+export async function getPredictionSnapshot(): Promise<PredictionSnapshot | null> {
+  return readSnapshotFromFile();
 }
 
-function buildCombosFromScores(numberScores: NumberScore[]) {
-  const topPool = numberScores.slice(0, 24).map((x) => x.number).sort((a, b) => a - b)
-  const probMap = new Map(numberScores.map((x) => [x.number, x.probability]))
+export async function getPredictionForRound(targetRound?: number): Promise<PredictionSnapshot | null> {
+  const snapshot = await getPredictionSnapshot();
+  if (!snapshot) return null;
+  if (targetRound == null) return snapshot;
+  return snapshot.prediction.targetRound === targetRound ? snapshot : null;
+}
 
-  const combos: ComboScore[] = []
-  let comboRank = 1
+export function getTopPredictionNumbers(snapshot: PredictionSnapshot, limit = 30): number[] {
+  return snapshot.prediction.topNumbersByRank.slice(0, Math.max(1, limit));
+}
 
-  for (let i = 0; i < topPool.length - 5 && combos.length < 20; i++) {
-    for (let j = i + 1; j < topPool.length - 4 && combos.length < 20; j++) {
-      const combo = [
-        topPool[i],
-        topPool[j],
-        topPool[(j + 2) % topPool.length],
-        topPool[(j + 5) % topPool.length],
-        topPool[(j + 8) % topPool.length],
-        topPool[(j + 11) % topPool.length]
-      ]
+export function getSortedTopPredictionNumbers(snapshot: PredictionSnapshot, limit = 30): number[] {
+  return getTopPredictionNumbers(snapshot, limit).slice().sort((a, b) => a - b);
+}
 
-      const unique = Array.from(new Set(combo)).sort((a, b) => a - b)
-      if (unique.length !== 6) continue
+export function getPredictionNumberMap(snapshot: PredictionSnapshot): Map<number, PredictionNumber> {
+  return new Map(snapshot.prediction.numbers.map((item) => [item.number, item]));
+}
 
-      combos.push({
-        rank: comboRank++,
+export function getPredictionSummary(snapshot: PredictionSnapshot) {
+  return {
+    targetRound: snapshot.prediction.targetRound,
+    modelKey: snapshot.prediction.modelKey,
+    modelVersion: snapshot.prediction.modelVersion,
+    featureVersion: snapshot.prediction.featureVersion ?? "unknown",
+    candidateCount: snapshot.summary.candidateCount,
+    topNumbersByRank: snapshot.prediction.topNumbersByRank,
+    topNumbersSorted: snapshot.prediction.topNumbersSorted,
+    generatedAt: snapshot.generatedAt,
+    sourceTable: snapshot.source.table,
+  };
+}
+
+export function getPredictionNumbers(snapshot: PredictionSnapshot): PredictionNumber[] {
+  return snapshot.prediction.numbers.slice();
+}
+
+export function toPredictionDebugJson(snapshot: PredictionSnapshot): string {
+  return JSON.stringify(
+    {
+      summary: getPredictionSummary(snapshot),
+      numbers: snapshot.prediction.numbers,
+    },
+    null,
+    2,
+  );
 }
