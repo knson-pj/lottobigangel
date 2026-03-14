@@ -1,88 +1,87 @@
-import { NextResponse } from 'next/server'
+import { NextResponse } from "next/server";
 
-import { assertCronAuthorized } from '@/lib/cron'
-import { writeServerLog } from '@/lib/log'
-import { runPrediction } from '@/lib/predict'
-import { supabaseAdmin } from '@/lib/supabase-admin'
+import { assertCronAuthorized } from "@/lib/cron";
+import { writeServerLog } from "@/lib/log";
+import { CURRENT_MODEL_VERSION, runPrediction } from "@/lib/prediction-engine";
+import { upsertModelProbabilityExports } from "@/lib/model-probability-exports";
+import { supabaseAdmin } from "@/lib/supabase-admin";
 
 export async function GET(req: Request) {
-  const route = '/api/cron/daily-predict'
+  const route = "/api/cron/daily-predict";
 
   try {
-    assertCronAuthorized(req)
+    assertCronAuthorized(req);
 
     const drawRes = await supabaseAdmin
-      .from('lotto_draws')
-      .select('round')
-      .order('round', { ascending: false })
+      .from("lotto_draws")
+      .select("round")
+      .order("round", { ascending: false })
       .limit(1)
-      .single()
+      .single();
 
-    if (drawRes.error) throw drawRes.error
+    if (drawRes.error) throw drawRes.error;
 
-    const latestRound = Number(drawRes.data.round)
-    const targetRound = latestRound + 1
-    const modelVersion = process.env.MODEL_VERSION ?? 'tcn-v1'
+    const latestRound = Number(drawRes.data.round);
+    const targetRound = latestRound + 1;
 
     const existingRun = await supabaseAdmin
-      .from('prediction_runs')
-      .select('id')
-      .eq('target_round', targetRound)
-      .eq('model_version', modelVersion)
-      .eq('triggered_by', 'cron')
-      .eq('status', 'completed')
+      .from("prediction_runs")
+      .select("id")
+      .eq("target_round", targetRound)
+      .eq("model_version", CURRENT_MODEL_VERSION)
+      .eq("triggered_by", "cron")
+      .eq("status", "completed")
       .limit(1)
-      .maybeSingle()
+      .maybeSingle();
 
-    if (existingRun.error) throw existingRun.error
+    if (existingRun.error) throw existingRun.error;
 
     if (existingRun.data) {
       await writeServerLog({
-        level: 'info',
-        eventType: 'cron.daily_predict.skipped',
+        level: "info",
+        eventType: "cron.daily_predict.skipped",
         route,
         targetRound,
         payload: {
-          reason: 'already_exists',
-          runId: existingRun.data.id
-        }
-      })
+          reason: "already_exists",
+          runId: existingRun.data.id,
+        },
+      });
 
       return NextResponse.json({
         ok: true,
         skipped: true,
-        reason: 'already_exists',
+        reason: "already_exists",
         runId: existingRun.data.id,
-        targetRound
-      })
+        targetRound,
+      });
     }
 
-    const result = await runPrediction(targetRound)
+    const result = await runPrediction(targetRound);
 
     const runInsert = await supabaseAdmin
-      .from('prediction_runs')
+      .from("prediction_runs")
       .insert({
         target_round: targetRound,
         model_version: result.modelVersion,
         feature_version: result.featureVersion,
-        triggered_by: 'cron',
-        status: 'completed',
+        triggered_by: "cron",
+        status: "completed",
         top_pool_size: result.topPoolSize,
-        combo_count: result.comboCount
+        combo_count: result.comboCount,
       })
-      .select('id')
-      .single()
+      .select("id")
+      .single();
 
-    if (runInsert.error) throw runInsert.error
-
-    const runId = runInsert.data.id
+    if (runInsert.error) throw runInsert.error;
+    const runId = runInsert.data.id;
 
     const numberRows = result.numberScores.map((item, idx) => ({
       run_id: runId,
       number: item.number,
       probability: item.probability,
-      rank_order: idx + 1
-    }))
+      rank_order: idx + 1,
+    }));
 
     const comboRows = result.combos.map((combo) => ({
       run_id: runId,
@@ -94,39 +93,46 @@ export async function GET(req: Request) {
       n5: combo.numbers[4],
       n6: combo.numbers[5],
       combo_score: combo.score,
-      meta: combo.meta ?? {}
-    }))
+      meta: combo.meta ?? {},
+    }));
 
-    const [numberInsert, comboInsert] = await Promise.all([
-      supabaseAdmin.from('prediction_number_scores').insert(numberRows),
-      supabaseAdmin.from('prediction_combos').insert(comboRows)
-    ])
+    const [numberInsert, comboInsert, exportResult] = await Promise.all([
+      supabaseAdmin.from("prediction_number_scores").insert(numberRows),
+      supabaseAdmin.from("prediction_combos").insert(comboRows),
+      upsertModelProbabilityExports(result, "cron"),
+    ]);
 
-    if (numberInsert.error) throw numberInsert.error
-    if (comboInsert.error) throw comboInsert.error
+    if (numberInsert.error) throw numberInsert.error;
+    if (comboInsert.error) throw comboInsert.error;
 
     await writeServerLog({
-      level: 'info',
-      eventType: 'cron.daily_predict.success',
+      level: "info",
+      eventType: "cron.daily_predict.success",
       route,
       targetRound,
       payload: {
         runId,
         latestRound,
         comboCount: result.comboCount,
-        topPoolSize: result.topPoolSize
-      }
-    })
+        topPoolSize: result.topPoolSize,
+        exportedCount: exportResult.upsertedCount,
+      },
+    });
 
-    return NextResponse.json({ ok: true, runId, targetRound })
+    return NextResponse.json({
+      ok: true,
+      runId,
+      targetRound,
+      exportedCount: exportResult.upsertedCount,
+    });
   } catch (error: any) {
     await writeServerLog({
-      level: 'error',
-      eventType: 'cron.daily_predict.error',
+      level: "error",
+      eventType: "cron.daily_predict.error",
       route,
-      payload: { message: error?.message ?? 'unknown error' }
-    })
+      payload: { message: error?.message ?? "unknown error" },
+    });
 
-    return NextResponse.json({ ok: false, error: error?.message ?? 'unknown error' }, { status: 500 })
+    return NextResponse.json({ ok: false, error: error?.message ?? "unknown error" }, { status: 500 });
   }
 }
