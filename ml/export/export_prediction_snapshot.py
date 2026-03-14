@@ -5,22 +5,27 @@
 Supabase(PostgREST)의 model_probability_exports 테이블/뷰에서
 최신 예측 묶음을 읽어 public/prediction_snapshot.json 으로 내보내는 스크립트.
 
+현재 확인된 실제 스키마 대응:
+- id
+- target_round
+- model_version
+- feature_version
+- number
+- probability
+- meta
+- created_at
+
 특징
 - .env.local 자동 로드
 - .env.local 이 없거나, 폴더이거나, 권한 이슈가 있어도 경고만 출력
-- export_id 우선으로 최신 묶음 선택
-- export_id가 없으면 target_round + model + generated_at 조합으로 fallback
-- 컬럼명이 조금 달라도 alias로 최대한 흡수
+- 실제 스키마(feature_version, meta, created_at) 반영
+- rank 컬럼이 없으면 meta.rank 또는 probability 기준으로 자동 rank 부여
+- export_id 가 없어도 target_round + model_version + feature_version 중심으로 최신 묶음 선택
 - 디버그 로그 포함
 - 외부 패키지 없이 표준 라이브러리만 사용
 
 기본 실행:
     python ml/export/export_prediction_snapshot.py --out public/prediction_snapshot.json --top-k 30 --pretty
-
-선택 옵션:
-    --target-round 1211
-    --table model_probability_exports
-    --limit 5000
 """
 
 from __future__ import annotations
@@ -86,6 +91,10 @@ FIELD_ALIASES = {
         "model_version",
         "version",
         "model_ver",
+    ],
+    "feature_version": [
+        "feature_version",
+        "feature_ver",
     ],
     "generated_at": [
         "generated_at",
@@ -235,6 +244,10 @@ def first_present(row: Dict[str, Any], logical_name: str) -> Any:
 def normalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
     metadata = coerce_json_object(first_present(row, "metadata"))
 
+    rank_value = first_present(row, "rank")
+    if rank_value in (None, ""):
+        rank_value = metadata.get("rank")
+
     reserved_keys = set()
     for names in FIELD_ALIASES.values():
         reserved_keys.update(names)
@@ -246,9 +259,10 @@ def normalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "targetRound": parse_int(first_present(row, "target_round")),
         "number": parse_int(first_present(row, "number")),
         "probability": parse_float(first_present(row, "probability")),
-        "rank": parse_int(first_present(row, "rank")),
+        "rank": parse_int(rank_value),
         "modelKey": first_present(row, "model_key"),
         "modelVersion": first_present(row, "model_version"),
+        "featureVersion": first_present(row, "feature_version"),
         "generatedAt": first_present(row, "generated_at"),
         "recentWindow": parse_int(first_present(row, "recent_window")),
         "calibrated": parse_bool(first_present(row, "calibrated")),
@@ -262,12 +276,12 @@ def group_key(item: Dict[str, Any]) -> Tuple[Any, ...]:
     if item["exportId"] not in (None, ""):
         return ("export_id", str(item["exportId"]))
 
+    # 현재 실제 스키마 기준 fallback
     return (
         "fallback",
         item["targetRound"],
-        str(item["modelKey"] or ""),
         str(item["modelVersion"] or ""),
-        str(item["generatedAt"] or ""),
+        str(item["featureVersion"] or ""),
     )
 
 
@@ -290,8 +304,8 @@ def choose_latest_group(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "number": item.get("number"),
                     "probability": item.get("probability"),
                     "rank": item.get("rank"),
-                    "modelKey": item.get("modelKey"),
                     "modelVersion": item.get("modelVersion"),
+                    "featureVersion": item.get("featureVersion"),
                     "generatedAt": item.get("generatedAt"),
                     "rawKeys": sorted(list(item.get("raw", {}).keys()))[:50],
                 }
@@ -309,14 +323,14 @@ def choose_latest_group(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 r["targetRound"] if r["targetRound"] is not None else -1,
                 str(r["generatedAt"] or ""),
                 str(r["modelVersion"] or ""),
-                str(r["modelKey"] or ""),
+                str(r["featureVersion"] or ""),
             ),
         )
         return (
             best["targetRound"] if best["targetRound"] is not None else -1,
             str(best["generatedAt"] or ""),
             str(best["modelVersion"] or ""),
-            str(best["modelKey"] or ""),
+            str(best["featureVersion"] or ""),
         )
 
     return max(groups.values(), key=sort_key)
@@ -450,6 +464,7 @@ def build_snapshot(items: List[Dict[str, Any]], table: str, top_k: int) -> Dict[
             "targetRound": head["targetRound"],
             "modelKey": str(head["modelKey"] or "stage3-minimal"),
             "modelVersion": str(head["modelVersion"] or "unknown"),
+            "featureVersion": str(head["featureVersion"] or "unknown"),
             "topK": int(top_k),
             "topNumbersByRank": top_numbers_by_rank,
             "topNumbersSorted": top_numbers_sorted,
@@ -516,11 +531,11 @@ def main() -> int:
         write_json(out_path, snapshot, pretty=args.pretty)
 
         print(f"[OK] prediction snapshot written: {out_path}")
-        print(f" - targetRound : {snapshot['prediction']['targetRound']}")
-        print(f" - modelKey    : {snapshot['prediction']['modelKey']}")
-        print(f" - modelVersion: {snapshot['prediction']['modelVersion']}")
-        print(f" - candidates  : {snapshot['summary']['candidateCount']}")
-        print(f" - topNumbers  : {snapshot['prediction']['topNumbersSorted']}")
+        print(f" - targetRound   : {snapshot['prediction']['targetRound']}")
+        print(f" - modelVersion  : {snapshot['prediction']['modelVersion']}")
+        print(f" - featureVersion: {snapshot['prediction']['featureVersion']}")
+        print(f" - candidates    : {snapshot['summary']['candidateCount']}")
+        print(f" - topNumbers    : {snapshot['prediction']['topNumbersSorted']}")
         return 0
 
     except Exception as e:
