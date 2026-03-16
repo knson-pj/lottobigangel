@@ -57,7 +57,7 @@ function normalizeDrawOrder(draws: DrawRow[]): DrawRow[] {
 export function buildProbabilityScores(draws: DrawRow[]): PredictionNumberScore[] {
   const ordered = normalizeDrawOrder(draws);
   const scores = Array.from({ length: 46 }, () => 0);
-  const latestSeenIndex = Array.from<number | null>({ length: 46 }, () => null);
+  const latestSeenIndex: Array<number | null> = Array.from({ length: 46 }, () => null);
 
   ordered.forEach((draw, index) => {
     const mainNumbers = [draw.n1, draw.n2, draw.n3, draw.n4, draw.n5, draw.n6];
