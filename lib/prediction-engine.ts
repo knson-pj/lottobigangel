@@ -1,7 +1,8 @@
 import { supabaseAdmin } from "@/lib/supabase-admin";
 
-type DrawRow = {
+export type DrawRow = {
   round: number;
+  draw_date?: string;
   n1: number;
   n2: number;
   n3: number;
@@ -37,9 +38,9 @@ export type PredictionRunResult = {
 
 export const CURRENT_MODEL_VERSION = process.env.MODEL_VERSION ?? "stage3-minimal";
 export const CURRENT_FEATURE_VERSION = process.env.FEATURE_VERSION ?? "baseline-v1";
-const DEFAULT_TOP_POOL_SIZE = 24;
-const DEFAULT_COMBO_COUNT = 5;
-const DRAW_FETCH_LIMIT = 80;
+export const DEFAULT_TOP_POOL_SIZE = 24;
+export const DEFAULT_COMBO_COUNT = 5;
+const DEFAULT_HISTORY_FETCH_LIMIT = 120;
 
 function uniqueSorted(numbers: number[]): [number, number, number, number, number, number] {
   const sorted = Array.from(new Set(numbers)).sort((a, b) => a - b);
@@ -49,45 +50,16 @@ function uniqueSorted(numbers: number[]): [number, number, number, number, numbe
   return sorted as [number, number, number, number, number, number];
 }
 
-function buildCombos(topPool: PredictionNumberScore[], comboCount: number): PredictionCombo[] {
-  const scoreMap = new Map(topPool.map((item) => [item.number, item.probability]));
-  const poolNumbers = topPool.map((item) => item.number);
-
-  if (poolNumbers.length < 24) {
-    throw new Error("top pool size must be at least 24 to generate default combos");
-  }
-
-  return Array.from({ length: comboCount }, (_, index) => {
-    const start = index;
-    const selected = [
-      poolNumbers[start],
-      poolNumbers[start + 4],
-      poolNumbers[start + 8],
-      poolNumbers[start + 12],
-      poolNumbers[start + 16],
-      poolNumbers[start + 20],
-    ];
-
-    const numbers = uniqueSorted(selected);
-    const score = numbers.reduce((sum, value) => sum + (scoreMap.get(value) ?? 0), 0);
-
-    return {
-      rank: index + 1,
-      numbers,
-      score,
-      meta: {
-        source: "heuristic-stage3-minimal",
-        poolOffsets: [start, start + 4, start + 8, start + 12, start + 16, start + 20],
-      },
-    };
-  });
+function normalizeDrawOrder(draws: DrawRow[]): DrawRow[] {
+  return draws.slice().sort((a, b) => b.round - a.round);
 }
 
-function buildProbabilityScores(draws: DrawRow[]): PredictionNumberScore[] {
+export function buildProbabilityScores(draws: DrawRow[]): PredictionNumberScore[] {
+  const ordered = normalizeDrawOrder(draws);
   const scores = Array.from({ length: 46 }, () => 0);
   const latestSeenIndex = Array.from<number | null>({ length: 46 }, () => null);
 
-  draws.forEach((draw, index) => {
+  ordered.forEach((draw, index) => {
     const mainNumbers = [draw.n1, draw.n2, draw.n3, draw.n4, draw.n5, draw.n6];
     const mainWeight = index < 10 ? 1.6 : index < 30 ? 0.9 : 0.45;
     const bonusWeight = mainWeight * 0.25;
@@ -141,12 +113,84 @@ function buildProbabilityScores(draws: DrawRow[]): PredictionNumberScore[] {
   }));
 }
 
+export function buildCombos(
+  numberScores: PredictionNumberScore[],
+  topPoolSize = DEFAULT_TOP_POOL_SIZE,
+  comboCount = DEFAULT_COMBO_COUNT,
+): PredictionCombo[] {
+  const topPool = numberScores.slice(0, topPoolSize);
+  const scoreMap = new Map(topPool.map((item) => [item.number, item.probability]));
+  const poolNumbers = topPool.map((item) => item.number);
+
+  if (poolNumbers.length < 24) {
+    throw new Error("top pool size must be at least 24 to generate default combos");
+  }
+
+  return Array.from({ length: comboCount }, (_, index) => {
+    const start = index;
+    const selected = [
+      poolNumbers[start],
+      poolNumbers[start + 4],
+      poolNumbers[start + 8],
+      poolNumbers[start + 12],
+      poolNumbers[start + 16],
+      poolNumbers[start + 20],
+    ];
+
+    const numbers = uniqueSorted(selected);
+    const score = numbers.reduce((sum, value) => sum + (scoreMap.get(value) ?? 0), 0);
+
+    return {
+      rank: index + 1,
+      numbers,
+      score,
+      meta: {
+        source: "heuristic-stage3-minimal",
+        poolOffsets: [start, start + 4, start + 8, start + 12, start + 16, start + 20],
+      },
+    };
+  });
+}
+
+export function predictFromHistoricalDraws(
+  historicalDraws: DrawRow[],
+  targetRound: number,
+  options?: {
+    topPoolSize?: number;
+    comboCount?: number;
+    modelVersion?: string;
+    featureVersion?: string;
+  },
+): PredictionRunResult {
+  if (historicalDraws.length < 20) {
+    throw new Error("historical draw data is insufficient");
+  }
+
+  const topPoolSize = options?.topPoolSize ?? DEFAULT_TOP_POOL_SIZE;
+  const comboCount = options?.comboCount ?? DEFAULT_COMBO_COUNT;
+  const modelVersion = options?.modelVersion ?? CURRENT_MODEL_VERSION;
+  const featureVersion = options?.featureVersion ?? CURRENT_FEATURE_VERSION;
+
+  const numberScores = buildProbabilityScores(historicalDraws);
+  const combos = buildCombos(numberScores, topPoolSize, comboCount);
+
+  return {
+    targetRound,
+    modelVersion,
+    featureVersion,
+    topPoolSize,
+    comboCount,
+    numberScores,
+    combos,
+  };
+}
+
 export async function runPrediction(targetRound: number): Promise<PredictionRunResult> {
   const drawRes = await supabaseAdmin
     .from("lotto_draws")
-    .select("round,n1,n2,n3,n4,n5,n6,bonus")
+    .select("round,draw_date,n1,n2,n3,n4,n5,n6,bonus")
     .order("round", { ascending: false })
-    .limit(DRAW_FETCH_LIMIT);
+    .limit(DEFAULT_HISTORY_FETCH_LIMIT);
 
   if (drawRes.error) {
     throw drawRes.error;
@@ -157,17 +201,5 @@ export async function runPrediction(targetRound: number): Promise<PredictionRunR
     throw new Error("lotto_draws data is insufficient. sync draws first.");
   }
 
-  const numberScores = buildProbabilityScores(draws);
-  const topPool = numberScores.slice(0, DEFAULT_TOP_POOL_SIZE);
-  const combos = buildCombos(topPool, DEFAULT_COMBO_COUNT);
-
-  return {
-    targetRound,
-    modelVersion: CURRENT_MODEL_VERSION,
-    featureVersion: CURRENT_FEATURE_VERSION,
-    topPoolSize: DEFAULT_TOP_POOL_SIZE,
-    comboCount: DEFAULT_COMBO_COUNT,
-    numberScores,
-    combos,
-  };
+  return predictFromHistoricalDraws(draws, targetRound);
 }
