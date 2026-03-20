@@ -310,11 +310,11 @@ def main() -> int:
     repo_root = resolve_repo_root()
     load_env_file_if_exists(repo_root / ".env.local")
 
-    supabase_url = (args.supabase_url or os.getenv("SUPABASE_URL", "")).strip()
+    supabase_url = (args.supabase_url or os.getenv("SUPABASE_URL", "") or os.getenv("NEXT_PUBLIC_SUPABASE_URL", "")).strip()
     supabase_key = (args.supabase_key or os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")).strip()
 
     if not supabase_url:
-        print("[ERROR] SUPABASE_URL이 비어 있습니다.", file=sys.stderr)
+        print("[ERROR] SUPABASE_URL 또는 NEXT_PUBLIC_SUPABASE_URL 이 비어 있습니다.", file=sys.stderr)
         return 1
     if not supabase_key:
         print("[ERROR] SUPABASE_SERVICE_ROLE_KEY가 비어 있습니다.", file=sys.stderr)

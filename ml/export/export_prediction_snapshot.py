@@ -365,7 +365,7 @@ def fetch_rows_from_supabase(
     limit: int,
 ) -> List[Dict[str, Any]]:
     if not supabase_url:
-        raise RuntimeError("SUPABASE_URL이 비어 있습니다. .env.local 또는 환경변수를 확인하세요.")
+        raise RuntimeError("SUPABASE_URL 또는 NEXT_PUBLIC_SUPABASE_URL 이 비어 있습니다. .env.local 또는 환경변수를 확인하세요.")
     if not supabase_key:
         raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY가 비어 있습니다. .env.local 또는 환경변수를 확인하세요.")
 
@@ -498,7 +498,7 @@ def main() -> int:
     env_path = repo_root / ".env.local"
     load_env_file_if_exists(env_path)
 
-    supabase_url = args.supabase_url or os.getenv("SUPABASE_URL", "").strip()
+    supabase_url = args.supabase_url or os.getenv("SUPABASE_URL", "") or os.getenv("NEXT_PUBLIC_SUPABASE_URL", "").strip()
     supabase_key = args.supabase_key or os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 
     try:
