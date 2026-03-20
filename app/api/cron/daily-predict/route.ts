@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { assertCronAuthorized } from "@/lib/cron";
 import { writeServerLog } from "@/lib/log";
-import { CURRENT_MODEL_VERSION, runPrediction } from "@/lib/prediction-engine";
+import { runPrediction } from "@/lib/prediction-engine";
 import { upsertModelProbabilityExports } from "@/lib/model-probability-exports";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 
@@ -23,12 +23,14 @@ export async function GET(req: Request) {
 
     const latestRound = Number(drawRes.data.round);
     const targetRound = latestRound + 1;
+    const result = await runPrediction(targetRound);
 
     const existingRun = await supabaseAdmin
       .from("prediction_runs")
       .select("id")
       .eq("target_round", targetRound)
-      .eq("model_version", CURRENT_MODEL_VERSION)
+      .eq("model_version", result.modelVersion)
+      .eq("feature_version", result.featureVersion)
       .eq("triggered_by", "cron")
       .eq("status", "completed")
       .limit(1)
@@ -45,6 +47,8 @@ export async function GET(req: Request) {
         payload: {
           reason: "already_exists",
           runId: existingRun.data.id,
+          modelVersion: result.modelVersion,
+          featureVersion: result.featureVersion,
         },
       });
 
@@ -56,8 +60,6 @@ export async function GET(req: Request) {
         targetRound,
       });
     }
-
-    const result = await runPrediction(targetRound);
 
     const runInsert = await supabaseAdmin
       .from("prediction_runs")
@@ -116,6 +118,8 @@ export async function GET(req: Request) {
         comboCount: result.comboCount,
         topPoolSize: result.topPoolSize,
         exportedCount: exportResult.upsertedCount,
+        modelVersion: result.modelVersion,
+        featureVersion: result.featureVersion,
       },
     });
 
@@ -130,9 +134,17 @@ export async function GET(req: Request) {
       level: "error",
       eventType: "cron.daily_predict.error",
       route,
-      payload: { message: error?.message ?? "unknown error" },
+      payload: {
+        message: error?.message ?? "unknown error",
+      },
     });
 
-    return NextResponse.json({ ok: false, error: error?.message ?? "unknown error" }, { status: 500 });
+    return NextResponse.json(
+      {
+        ok: false,
+        error: error?.message ?? "unknown error",
+      },
+      { status: 500 },
+    );
   }
 }

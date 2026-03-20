@@ -20,6 +20,7 @@ export type E2ECheckResult = {
     topPoolSize?: number;
     comboCount?: number;
     top24Sorted?: number[];
+    inferenceSource?: string;
     error?: string;
   };
   snapshotSources: {
@@ -92,6 +93,7 @@ export async function runE2ECheck(): Promise<E2ECheckResult> {
         .slice(0, result.topPoolSize)
         .map((item) => item.number)
         .sort((a, b) => a - b),
+      inferenceSource: String(result.numberScores[0]?.extra?.sourceKind ?? "unknown"),
     };
   } catch (error: any) {
     dryRun = {

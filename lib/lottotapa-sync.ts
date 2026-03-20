@@ -1,5 +1,4 @@
 const RESULT_ALL_URL = 'https://lottotapa.com/stat/result_all.php'
-const RESULT_DETAIL_URL = (round: number) => `https://lottotapa.com/stat/result/${round}`
 
 export type DrawRow = {
   round: number
@@ -51,11 +50,29 @@ export type SyncLatestResult = {
   features: DrawFeatureRow
 }
 
+type ParsedLatestDraw = {
+  round: number
+  drawDate: string
+  machineNo: number
+  main: [number, number, number, number, number, number]
+  bonus: number
+  stats: {
+    oddCount: number | null
+    evenCount: number | null
+    lowCount: number | null
+    highCount: number | null
+    acValue: number | null
+    endSum: number | null
+    totalSum: number | null
+  }
+}
+
 function htmlToText(html: string) {
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<br\s*\/?>/gi, ' ')
+    .replace(/<\/(p|div|li|tr|td|th|section|article|header|footer|h1|h2|h3|h4|h5|h6)>/gi, ' ')
     .replace(/<[^>]+>/g, ' ')
     .replace(/&nbsp;/gi, ' ')
     .replace(/&amp;/gi, '&')
@@ -83,25 +100,8 @@ async function fetchText(url: string) {
   return await res.text()
 }
 
-function parseLatestRound(resultAllHtml: string) {
-  const text = htmlToText(resultAllHtml)
-  const matches = [...text.matchAll(/(\d+)회 로또 당첨번호\s*\((\d{4}-\d{2}-\d{2})\)\s*(\d+)호기/g)]
-  if (matches.length === 0) {
-    throw new Error('latest round not found from result_all page')
-  }
-  return Math.max(...matches.map((m) => Number(m[1])))
-}
-
-function parseHeader(text: string, round: number) {
-  const header = text.match(new RegExp(`${round}회 로또 당첨번호\\s*\\((\\d{4}-\\d{2}-\\d{2})\\)\\s*(\\d+)호기`))
-  if (!header) {
-    throw new Error(`header not found for round ${round}`)
-  }
-
-  return {
-    drawDate: header[1],
-    machineNo: Number(header[2])
-  }
+function uniqueSorted(values: number[]) {
+  return Array.from(new Set(values)).sort((a, b) => a - b)
 }
 
 function parseStats(text: string) {
@@ -129,54 +129,78 @@ function parseStats(text: string) {
   }
 }
 
-function uniqueSorted(values: number[]) {
-  return Array.from(new Set(values)).sort((a, b) => a - b)
-}
+function parseLatestConfirmedDrawFromResultAll(resultAllHtml: string): ParsedLatestDraw {
+  const text = htmlToText(resultAllHtml)
 
-function parseNumbersFromBody(html: string, round: number) {
-  const slicePoint = html.indexOf(`${round}회 로또 당첨번호`)
-  const source = slicePoint >= 0 ? html.slice(slicePoint, slicePoint + 8000) : html.slice(0, 8000)
+  const headerRegex =
+    /(\d+)회 로또 당첨번호\s*\((\d{4}-\d{2}-\d{2})\)\s*(\d+)호기\s*(\d{1,2})\s*(\d{1,2})\s*(\d{1,2})\s*(\d{1,2})\s*(\d{1,2})\s*(\d{1,2})\s*\+\s*(\d{1,2})/g
 
-  // 1) Prefer ball-like spans/divs that contain only 1~45
-  const exactBlocks = [...source.matchAll(/>(\d{1,2})</g)]
-    .map((m) => Number(m[1]))
-    .filter((n) => n >= 1 && n <= 45)
+  const matches = [...text.matchAll(headerRegex)]
+  if (matches.length === 0) {
+    throw new Error('latest draw block not found from result_all page')
+  }
 
-  // Scan contiguous windows for 7 distinct lotto-ish values
-  for (let i = 0; i <= exactBlocks.length - 7; i++) {
-    const candidate = exactBlocks.slice(i, i + 7)
-    if (candidate.every((n) => n >= 1 && n <= 45)) {
-      const first6 = candidate.slice(0, 6)
-      const bonus = candidate[6]
-      if (uniqueSorted(first6).length === 6 && !first6.includes(bonus)) {
-        return {
-          main: uniqueSorted(first6),
-          bonus
-        }
-      }
+  let picked: RegExpMatchArray | null = null
+  let pickedIndex = -1
+  let latestRound = -1
+
+  for (const match of matches) {
+    const round = Number(match[1])
+    if (round > latestRound) {
+      latestRound = round
+      picked = match
+      pickedIndex = match.index ?? -1
     }
   }
 
-  const text = htmlToText(source)
-  const headerPos = text.indexOf(`${round}회 로또 당첨번호`)
-  const sub = headerPos >= 0 ? text.slice(headerPos, headerPos + 500) : text.slice(0, 500)
-  const numbers = [...sub.matchAll(/\b\d+\b/g)]
-    .map((m) => Number(m[0]))
-    .filter((n) => n >= 1 && n <= 45)
-
-  for (let i = 0; i <= numbers.length - 7; i++) {
-    const candidate = numbers.slice(i, i + 7)
-    const first6 = candidate.slice(0, 6)
-    const bonus = candidate[6]
-    if (uniqueSorted(first6).length === 6 && !first6.includes(bonus)) {
-      return {
-        main: uniqueSorted(first6),
-        bonus
-      }
-    }
+  if (!picked || pickedIndex < 0) {
+    throw new Error('failed to select latest draw block from result_all page')
   }
 
-  throw new Error(`could not parse winning numbers for round ${round}`)
+  const nextMatch = matches.find((m) => (m.index ?? -1) > pickedIndex)
+  const blockEnd = nextMatch?.index ?? Math.min(text.length, pickedIndex + 500)
+  const blockText = text.slice(pickedIndex, blockEnd)
+
+  const mainNumbers = [
+    Number(picked[4]),
+    Number(picked[5]),
+    Number(picked[6]),
+    Number(picked[7]),
+    Number(picked[8]),
+    Number(picked[9])
+  ]
+
+  const bonus = Number(picked[10])
+
+  if (
+    mainNumbers.some((n) => !Number.isFinite(n) || n < 1 || n > 45) ||
+    !Number.isFinite(bonus) ||
+    bonus < 1 ||
+    bonus > 45
+  ) {
+    throw new Error(`invalid winning numbers parsed for round ${latestRound}`)
+  }
+
+  const uniqueMain = uniqueSorted(mainNumbers)
+  if (uniqueMain.length !== 6 || uniqueMain.includes(bonus)) {
+    throw new Error(`could not parse winning numbers for round ${latestRound}`)
+  }
+
+  return {
+    round: latestRound,
+    drawDate: picked[2],
+    machineNo: Number(picked[3]),
+    main: [
+      uniqueMain[0],
+      uniqueMain[1],
+      uniqueMain[2],
+      uniqueMain[3],
+      uniqueMain[4],
+      uniqueMain[5]
+    ],
+    bonus,
+    stats: parseStats(blockText)
+  }
 }
 
 function sameEndingStats(numbers: number[]) {
@@ -334,34 +358,27 @@ function buildFeatures(draw: DrawRow, previousNumbers: number[]) {
 
 export async function fetchLatestConfirmedDraw(): Promise<DrawRow> {
   const resultAllHtml = await fetchText(RESULT_ALL_URL)
-  const latestRound = parseLatestRound(resultAllHtml)
-  const detailUrl = RESULT_DETAIL_URL(latestRound)
-  const detailHtml = await fetchText(detailUrl)
-  const text = htmlToText(detailHtml)
-
-  const header = parseHeader(text, latestRound)
-  const stats = parseStats(text)
-  const parsedNumbers = parseNumbersFromBody(detailHtml, latestRound)
+  const parsed = parseLatestConfirmedDrawFromResultAll(resultAllHtml)
 
   return {
-    round: latestRound,
-    draw_date: header.drawDate,
-    machine_no: Number.isFinite(header.machineNo) ? header.machineNo : null,
-    n1: parsedNumbers.main[0],
-    n2: parsedNumbers.main[1],
-    n3: parsedNumbers.main[2],
-    n4: parsedNumbers.main[3],
-    n5: parsedNumbers.main[4],
-    n6: parsedNumbers.main[5],
-    bonus: parsedNumbers.bonus,
-    odd_count: stats.oddCount,
-    even_count: stats.evenCount,
-    low_count: stats.lowCount,
-    high_count: stats.highCount,
-    ac_value: stats.acValue,
-    end_sum: stats.endSum,
-    total_sum: stats.totalSum,
-    source_url: detailUrl
+    round: parsed.round,
+    draw_date: parsed.drawDate,
+    machine_no: Number.isFinite(parsed.machineNo) ? parsed.machineNo : null,
+    n1: parsed.main[0],
+    n2: parsed.main[1],
+    n3: parsed.main[2],
+    n4: parsed.main[3],
+    n5: parsed.main[4],
+    n6: parsed.main[5],
+    bonus: parsed.bonus,
+    odd_count: parsed.stats.oddCount,
+    even_count: parsed.stats.evenCount,
+    low_count: parsed.stats.lowCount,
+    high_count: parsed.stats.highCount,
+    ac_value: parsed.stats.acValue,
+    end_sum: parsed.stats.endSum,
+    total_sum: parsed.stats.totalSum,
+    source_url: RESULT_ALL_URL
   }
 }
 

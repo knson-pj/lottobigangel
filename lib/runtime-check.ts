@@ -26,8 +26,9 @@ function nowIso(): string {
 
 async function checkEnv(): Promise<VerifyItem> {
   const missing: string[] = [];
+  const hasSupabaseUrl = !!(process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL);
 
-  if (!process.env.SUPABASE_URL) missing.push("SUPABASE_URL");
+  if (!hasSupabaseUrl) missing.push("NEXT_PUBLIC_SUPABASE_URL|SUPABASE_URL");
   if (!process.env.SUPABASE_SERVICE_ROLE_KEY) missing.push("SUPABASE_SERVICE_ROLE_KEY");
 
   return {
@@ -36,14 +37,15 @@ async function checkEnv(): Promise<VerifyItem> {
     message: missing.length === 0 ? "필수 환경변수 확인 완료" : `누락 환경변수: ${missing.join(", ")}`,
     detail: {
       missing,
+      hasNextPublicSupabaseUrl: !!process.env.NEXT_PUBLIC_SUPABASE_URL,
+      hasSupabaseUrl: !!process.env.SUPABASE_URL,
+      hasServiceRoleKey: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
     },
   };
 }
 
 async function checkLottoDraws(): Promise<VerifyItem> {
-  const countRes = await supabaseAdmin
-    .from("lotto_draws")
-    .select("*", { count: "exact", head: true });
+  const countRes = await supabaseAdmin.from("lotto_draws").select("*", { count: "exact", head: true });
 
   if (countRes.error) {
     return {
@@ -78,7 +80,7 @@ async function checkLottoDraws(): Promise<VerifyItem> {
     ok: (countRes.count ?? 0) >= 20,
     message:
       (countRes.count ?? 0) >= 20
-        ? "lotto_draws 학습/예측 최소 데이터 확보"
+        ? "lotto_draws 학습/검증 최소 데이터 확보"
         : "lotto_draws 데이터가 부족함 (최소 20회차 권장)",
     detail: {
       count: countRes.count ?? 0,
@@ -89,9 +91,7 @@ async function checkLottoDraws(): Promise<VerifyItem> {
 }
 
 async function checkPredictionRuns(): Promise<VerifyItem> {
-  const countRes = await supabaseAdmin
-    .from("prediction_runs")
-    .select("*", { count: "exact", head: true });
+  const countRes = await supabaseAdmin.from("prediction_runs").select("*", { count: "exact", head: true });
 
   if (countRes.error) {
     return {

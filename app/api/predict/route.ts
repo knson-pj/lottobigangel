@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { NextResponse } from "next/server";
-import { z } from "zod";
+import { ZodError, z } from "zod";
 
 import { writeServerLog } from "@/lib/log";
 import { runPrediction } from "@/lib/prediction-engine";
@@ -19,6 +19,46 @@ export async function POST(req: Request) {
   try {
     const parsed = bodySchema.parse(await req.json());
     const result = await runPrediction(parsed.targetRound);
+
+    const existingRun = await supabaseAdmin
+      .from("prediction_runs")
+      .select("id")
+      .eq("target_round", parsed.targetRound)
+      .eq("model_version", result.modelVersion)
+      .eq("feature_version", result.featureVersion)
+      .eq("triggered_by", "user")
+      .eq("status", "completed")
+      .limit(1)
+      .maybeSingle();
+
+    if (existingRun.error) throw existingRun.error;
+
+    if (existingRun.data) {
+      await writeServerLog({
+        level: "info",
+        eventType: "predict.skipped",
+        requestId,
+        route,
+        targetRound: parsed.targetRound,
+        payload: {
+          durationMs: Date.now() - startedAt,
+          reason: "already_exists",
+          runId: existingRun.data.id,
+          modelVersion: result.modelVersion,
+          featureVersion: result.featureVersion,
+        },
+      });
+
+      return NextResponse.json({
+        ok: true,
+        skipped: true,
+        requestId,
+        runId: existingRun.data.id,
+        targetRound: parsed.targetRound,
+        top24: result.numberScores.slice(0, 24),
+        combos: result.combos,
+      });
+    }
 
     const runInsert = await supabaseAdmin
       .from("prediction_runs")
@@ -77,6 +117,8 @@ export async function POST(req: Request) {
         durationMs: Date.now() - startedAt,
         runId,
         exportedCount: exportResult.upsertedCount,
+        modelVersion: result.modelVersion,
+        featureVersion: result.featureVersion,
       },
     });
 
@@ -100,13 +142,15 @@ export async function POST(req: Request) {
       },
     });
 
+    const status = error instanceof ZodError ? 400 : 500;
+
     return NextResponse.json(
       {
         ok: false,
         requestId,
         error: error?.message ?? "unknown error",
       },
-      { status: 500 },
+      { status },
     );
   }
 }
